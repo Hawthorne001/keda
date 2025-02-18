@@ -134,7 +134,7 @@ func ResolveScaleTargetPodSpec(ctx context.Context, kubeClient client.Client, sc
 			podTemplateSpec.Spec = withPods.Spec.Template.Spec
 		}
 
-		if podTemplateSpec.Spec.Containers == nil || len(podTemplateSpec.Spec.Containers) == 0 {
+		if len(podTemplateSpec.Spec.Containers) == 0 {
 			logger.V(1).Info("There aren't any containers found in the ScaleTarget, therefore it is no possible to inject environment properties", "scaleTargetRef.Name", obj.Spec.ScaleTargetRef.Name)
 			return nil, "", nil
 		}
@@ -333,10 +333,10 @@ func resolveAuthRef(ctx context.Context, client client.Client, logger logr.Logge
 					logger.Error(err, "error authenticating to Aws Secret Manager", "triggerAuthRef.Name", triggerAuthRef.Name)
 				} else {
 					for _, secret := range triggerAuthSpec.AwsSecretManager.Secrets {
-						res, err := awsSecretManagerHandler.Read(ctx, logger, secret.Name, secret.VersionID, secret.VersionStage)
+						res, err := awsSecretManagerHandler.Read(ctx, logger, secret.Name, secret.VersionID, secret.VersionStage, secret.SecretKey)
 						if err != nil {
 							logger.Error(err, "error trying to read secret from Aws Secret Manager", "triggerAuthRef.Name", triggerAuthRef.Name,
-								"secret.Name", secret.Name, "secret.Version", secret.VersionID, "secret.VersionStage", secret.VersionStage)
+								"secret.Name", secret.Name, "secret.Version", secret.VersionID, "secret.VersionStage", secret.VersionStage, "secret.SecretKey", secret.SecretKey)
 						} else {
 							result[secret.Parameter] = res
 						}

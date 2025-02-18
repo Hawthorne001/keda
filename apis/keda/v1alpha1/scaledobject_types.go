@@ -23,7 +23,10 @@ import (
 
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
+
+var scaledobjecttypeslog = logf.Log.WithName("scaledobject-types")
 
 // +genclient
 // +kubebuilder:object:root=true
@@ -33,12 +36,12 @@ import (
 // +kubebuilder:printcolumn:name="ScaleTargetName",type="string",JSONPath=".spec.scaleTargetRef.name"
 // +kubebuilder:printcolumn:name="Min",type="integer",JSONPath=".spec.minReplicaCount"
 // +kubebuilder:printcolumn:name="Max",type="integer",JSONPath=".spec.maxReplicaCount"
-// +kubebuilder:printcolumn:name="Triggers",type="string",JSONPath=".spec.triggers[*].type"
-// +kubebuilder:printcolumn:name="Authentication",type="string",JSONPath=".spec.triggers[*].authenticationRef.name"
 // +kubebuilder:printcolumn:name="Ready",type="string",JSONPath=".status.conditions[?(@.type==\"Ready\")].status"
 // +kubebuilder:printcolumn:name="Active",type="string",JSONPath=".status.conditions[?(@.type==\"Active\")].status"
 // +kubebuilder:printcolumn:name="Fallback",type="string",JSONPath=".status.conditions[?(@.type==\"Fallback\")].status"
 // +kubebuilder:printcolumn:name="Paused",type="string",JSONPath=".status.conditions[?(@.type==\"Paused\")].status"
+// +kubebuilder:printcolumn:name="Triggers",type="string",JSONPath=".status.triggersTypes"
+// +kubebuilder:printcolumn:name="Authentications",type="string",JSONPath=".status.authenticationsTypes"
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
 
 // ScaledObject is a specification for a ScaledObject resource
@@ -75,7 +78,7 @@ const (
 	// HealthStatusFailing means the status of the health object is failing
 	HealthStatusFailing HealthStatusType = "Failing"
 
-	// Composite metric name used for scalingModifiers composite metric
+	// CompositeMetricName is used for scalingModifiers composite metric
 	CompositeMetricName string = "composite-metric"
 
 	defaultHPAMinReplicas int32 = 1
@@ -87,6 +90,8 @@ type ScaledObjectSpec struct {
 	ScaleTargetRef *ScaleTarget `json:"scaleTargetRef"`
 	// +optional
 	PollingInterval *int32 `json:"pollingInterval,omitempty"`
+	// +optional
+	InitialCooldownPeriod *int32 `json:"initialCooldownPeriod,omitempty"`
 	// +optional
 	CooldownPeriod *int32 `json:"cooldownPeriod,omitempty"`
 	// +optional
@@ -101,8 +106,6 @@ type ScaledObjectSpec struct {
 	Triggers []ScaleTriggers `json:"triggers"`
 	// +optional
 	Fallback *Fallback `json:"fallback,omitempty"`
-	// +optional
-	InitialCooldownPeriod int32 `json:"initialCooldownPeriod,omitempty"`
 }
 
 // Fallback is the spec for fallback options
@@ -177,6 +180,10 @@ type ScaledObjectStatus struct {
 	PausedReplicaCount *int32 `json:"pausedReplicaCount,omitempty"`
 	// +optional
 	HpaName string `json:"hpaName,omitempty"`
+	// +optional
+	TriggersTypes *string `json:"triggersTypes,omitempty"`
+	// +optional
+	AuthenticationsTypes *string `json:"authenticationsTypes,omitempty"`
 }
 
 // +kubebuilder:object:root=true
@@ -233,7 +240,7 @@ func (so *ScaledObject) IsUsingModifiers() bool {
 	return so.Spec.Advanced != nil && !reflect.DeepEqual(so.Spec.Advanced.ScalingModifiers, ScalingModifiers{})
 }
 
-// getHPAMinReplicas returns MinReplicas based on definition in ScaledObject or default value if not defined
+// GetHPAMinReplicas returns MinReplicas based on definition in ScaledObject or default value if not defined
 func (so *ScaledObject) GetHPAMinReplicas() *int32 {
 	if so.Spec.MinReplicaCount != nil && *so.Spec.MinReplicaCount > 0 {
 		return so.Spec.MinReplicaCount
@@ -242,7 +249,7 @@ func (so *ScaledObject) GetHPAMinReplicas() *int32 {
 	return &tmp
 }
 
-// getHPAMaxReplicas returns MaxReplicas based on definition in ScaledObject or default value if not defined
+// GetHPAMaxReplicas returns MaxReplicas based on definition in ScaledObject or default value if not defined
 func (so *ScaledObject) GetHPAMaxReplicas() int32 {
 	if so.Spec.MaxReplicaCount != nil {
 		return *so.Spec.MaxReplicaCount
@@ -250,21 +257,21 @@ func (so *ScaledObject) GetHPAMaxReplicas() int32 {
 	return defaultHPAMaxReplicas
 }
 
-// checkReplicaCountBoundsAreValid checks that Idle/Min/Max ReplicaCount defined in ScaledObject are correctly specified
+// CheckReplicaCountBoundsAreValid checks that Idle/Min/Max ReplicaCount defined in ScaledObject are correctly specified
 // i.e. that Min is not greater than Max or Idle greater or equal to Min
 func CheckReplicaCountBoundsAreValid(scaledObject *ScaledObject) error {
-	min := int32(0)
+	minReplicas := int32(0)
 	if scaledObject.Spec.MinReplicaCount != nil {
-		min = *scaledObject.GetHPAMinReplicas()
+		minReplicas = *scaledObject.GetHPAMinReplicas()
 	}
-	max := scaledObject.GetHPAMaxReplicas()
+	maxReplicas := scaledObject.GetHPAMaxReplicas()
 
-	if min > max {
-		return fmt.Errorf("MinReplicaCount=%d must be less than MaxReplicaCount=%d", min, max)
+	if minReplicas > maxReplicas {
+		return fmt.Errorf("MinReplicaCount=%d must be less than MaxReplicaCount=%d", minReplicas, maxReplicas)
 	}
 
-	if scaledObject.Spec.IdleReplicaCount != nil && *scaledObject.Spec.IdleReplicaCount >= min {
-		return fmt.Errorf("IdleReplicaCount=%d must be less than MinReplicaCount=%d", *scaledObject.Spec.IdleReplicaCount, min)
+	if scaledObject.Spec.IdleReplicaCount != nil && *scaledObject.Spec.IdleReplicaCount >= minReplicas {
+		return fmt.Errorf("IdleReplicaCount=%d must be less than MinReplicaCount=%d", *scaledObject.Spec.IdleReplicaCount, minReplicas)
 	}
 
 	return nil
@@ -284,10 +291,10 @@ func CheckFallbackValid(scaledObject *ScaledObject) error {
 
 	for _, trigger := range scaledObject.Spec.Triggers {
 		if trigger.Type == cpuString || trigger.Type == memoryString {
-			return fmt.Errorf("type is %s , but fallback it is not supported by the CPU & memory scalers", trigger.Type)
+			scaledobjecttypeslog.Error(nil, fmt.Sprintf("type is %s , but fallback it is not supported by the CPU & memory scalers", trigger.Type))
 		}
 		if trigger.MetricType != autoscalingv2.AverageValueMetricType {
-			return fmt.Errorf("MetricType=%s, but Fallback can only be enabled for triggers with metric of type AverageValue", trigger.MetricType)
+			return fmt.Errorf("MetricType=%s, but fallback can only be enabled for triggers with metric of type AverageValue", trigger.MetricType)
 		}
 	}
 	return nil
